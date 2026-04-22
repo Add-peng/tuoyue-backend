@@ -1,0 +1,7 @@
+fastapi
+uvicorn
+crewai
+pydantic
+python-json-logger
+slowapi
+redis
