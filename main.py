@@ -77,8 +77,14 @@ def setup_logging():
 
 logger = setup_logging()
 
-# 初始化 FastAPI 应用
-app = FastAPI(title="拓岳 SaaS 引擎接口")
+# 初始化 FastAPI 应用（环境变量控制 API 文档是否可用）
+environment = os.getenv("ENVIRONMENT", "development")
+docs_enabled = environment != "production"
+app = FastAPI(
+    title="拓岳 SaaS 引擎接口",
+    docs_url="/docs" if docs_enabled else None,
+    redoc_url="/redoc" if docs_enabled else None,
+)
 limiter = Limiter(key_func=get_remote_address)
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
