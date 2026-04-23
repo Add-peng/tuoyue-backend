@@ -254,6 +254,11 @@ def read_root():
     logger.info("health check", extra={"task_id": None})
     return {"message": "拓岳 AI 引擎正在运行中...", "storage": "redis"}
 
+# 独立健康检查端点
+@app.get("/health")
+async def health_check():
+    return {"status": "ok"}
+
 # Redis 连通性检查
 @app.get("/api/health/redis")
 def check_redis():
