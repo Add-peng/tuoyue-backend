@@ -23,6 +23,7 @@ load_dotenv()
 # 业务模块
 import sms_service
 import user_store
+from app.middleware import SensitiveWordMiddleware, sensitive_filter
 
 try:
     from pythonjsonlogger import jsonlogger
@@ -126,10 +127,23 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# 敏感词过滤中间件（DFA 算法，启动时加载词库）
+app.add_middleware(SensitiveWordMiddleware)
+
+# 提前初始化全局敏感词过滤器
+_ = sensitive_filter
+
 # Redis 客户端（连接本地 Docker 运行的 Redis）
 redis_client = redis.Redis(host='localhost', port=6379, decode_responses=True)
 # 注入共享实例给 user_store，避免重复连接
 user_store.set_redis_client(redis_client)
+
+# ================== FastAPI 生命周期事件 ==================
+
+@app.on_event("startup")
+async def startup_event():
+    """应用启动时初始化各组件"""
+    logger.info("应用启动完成")
 
 
 def _check_redis():
