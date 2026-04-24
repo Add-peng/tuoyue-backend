@@ -10,8 +10,10 @@ import json
 import uuid
 import hashlib
 import logging
+import random
+import string
 from datetime import datetime, timedelta
-from typing import Optional
+from typing import Optional, Tuple
 
 try:
     import jwt
@@ -210,6 +212,78 @@ def get_or_create_user(phone: str) -> tuple[dict, bool]:
         return existing, False
     new_user = create_user(phone)
     return new_user, True
+
+
+def generate_random_password(length: int = 8) -> str:
+    """
+    生成随机密码（字母+数字，8位）。
+    """
+    chars = string.ascii_letters + string.digits
+    return "".join(random.choice(chars) for _ in range(length))
+
+
+def reset_password(user_id: str) -> Tuple[Optional[str], Optional[str]]:
+    """
+    重置用户密码。
+
+    流程：
+      1. 通过 user_id 索引找到 phone_hash
+      2. 生成 8 位随机密码，PBKDF2 哈希后写回 Redis
+      3. 返回 (手机号明文, 新密码原文)
+
+    返回:
+      (phone, new_password) 成功
+      (None, None)           用户不存在或 Redis 不可用
+
+    TODO: 接入真实 DB 时替换为：
+      user = db.users.find_first(where={"user_id": user_id})
+      db.users.update(
+          where={"user_id": user_id},
+          data={"password_hash": _hash_password(new_password), "updated_at": now},
+      )
+    """
+    try:
+        r = _get_redis()
+        phone_hash = r.get(_user_id_index_key(user_id))
+    except Exception as e:
+        logger.error("reset_password: Redis error: %s", e)
+        return None, None
+
+    if not phone_hash:
+        return None, None
+
+    user_key = _user_key(phone_hash)
+    try:
+        raw = r.hget(user_key, "data")
+    except Exception as e:
+        logger.error("reset_password: Redis read error: %s", e)
+        return None, None
+
+    if not raw:
+        return None, None
+
+    user = json.loads(raw)
+    phone = user.get("phone", "")
+    new_password = generate_random_password(8)
+    new_hash = _hash_password(new_password)
+    now = datetime.utcnow().isoformat()
+
+    user["password_hash"] = new_hash
+    user["updated_at"] = now
+
+    try:
+        pipe = r.pipeline()
+        pipe.hset(user_key, mapping={"data": json.dumps(user, ensure_ascii=False)})
+        pipe.execute()
+    except Exception as e:
+        logger.error("reset_password: Redis write error: %s", e)
+        return None, None
+
+    logger.info(
+        "Password reset by admin",
+        extra={"user_id": user_id, "phone_masked": mask_phone(phone)},
+    )
+    return phone, new_password
 
 
 def mask_phone(phone: str) -> str:

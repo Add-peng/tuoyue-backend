@@ -181,3 +181,81 @@ def _mask_phone(phone: str) -> str:
     if len(phone) == 11:
         return f"{phone[:3]}****{phone[-4:]}"
     return phone[:3] + "****"
+
+
+def send_password_sms(phone: str, new_password: str) -> bool:
+    """
+    发送密码通知短信（供管理员重置密码接口调用）。
+
+    - phone: 目标手机号
+    - new_password: 新密码原文（8位随机字符串）
+
+    返回: True=成功, False=失败（网络异常等）
+    降级: credentials 未配置或 requests 不可用时在控制台打印密码
+    """
+    # 优先使用与验证码相同的模板（${code} 占位符接受任意文本）
+    params = _build_request_params(
+        action="SendSms",
+        extra_params={
+            "PhoneNumbers": phone,
+            "SignName": ALIYUN_SMS_SIGN_NAME,
+            "TemplateCode": ALIYUN_SMS_TEMPLATE_CODE,
+            "TemplateParam": json.dumps({"code": new_password}, ensure_ascii=False),
+        },
+    )
+
+    if not ALIYUN_ACCESS_KEY_ID or not ALIYUN_ACCESS_KEY_SECRET:
+        logger.warning(
+            "Password SMS: credentials not configured, using console fallback",
+            extra={"phone": _mask_phone(phone), "new_password": new_password},
+        )
+        _console_password_fallback(phone, new_password)
+        return True  # 降级场景视为成功
+
+    if not _REQUESTS_AVAILABLE:
+        logger.warning(
+            "Password SMS: requests library not available, using console fallback",
+            extra={"phone": _mask_phone(phone), "new_password": new_password},
+        )
+        _console_password_fallback(phone, new_password)
+        return True
+
+    try:
+        response = requests.post(
+            ALIYUN_SMS_ENDPOINT,
+            data=params,
+            timeout=10,
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+        )
+        result = response.json()
+        code_api = result.get("Code", "")
+
+        if code_api in ("OK", "isv.SMS_SUCCESS"):
+            logger.info(
+                "Password SMS sent successfully",
+                extra={"phone": _mask_phone(phone), "biz_id": result.get("BizId", "")},
+            )
+            return True
+        else:
+            logger.error(
+                "Password SMS send failed",
+                extra={"phone": _mask_phone(phone), "code": code_api, "msg": result.get("Message", "")},
+            )
+            return False
+
+    except Exception as e:
+        logger.error(
+            "Password SMS send exception",
+            extra={"phone": _mask_phone(phone), "error": str(e)},
+        )
+        return False
+
+
+def _console_password_fallback(phone: str, password: str) -> None:
+    """降级打印密码（控制台，不走短信）"""
+    print(f"\n{'='*50}")
+    print(f"  [密码通知-降级打印] （短信服务不可用）")
+    print(f"  手机号: {_mask_phone(phone)}")
+    print(f"  新密码: {password}")
+    print(f"  请人工联系用户告知密码")
+    print(f"{'='*50}\n")

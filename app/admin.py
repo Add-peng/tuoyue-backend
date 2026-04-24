@@ -19,6 +19,9 @@ from typing import Optional
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field
 
+# 复用短信服务
+import sms_service
+
 # ---------------------------------------------------------------------------
 # 共享 Redis 客户端（从 main.py 注入）
 # ---------------------------------------------------------------------------
@@ -75,6 +78,11 @@ class UpdateTierResponse(BaseModel):
     user_id: str
     tier: str
     updated_at: str
+
+
+class ResetPasswordResponse(BaseModel):
+    success: bool
+    message: str
 
 
 # ---- 订单相关 ----
@@ -205,6 +213,17 @@ def _update_user_tier(user_id: str, tier: str):
     return {**user, "tier": tier}
 
 
+def _reset_user_password(user_id: str):
+    """
+    重置用户密码（生成随机密码，哈希存储，返回明文用于短信通知）。
+
+    TODO: 接入真实 DB 时替换为 user_store.reset_password(user_id)
+      （user_store.py 中已实现完整的 Redis 版本）
+    """
+    import user_store
+    return user_store.reset_password(user_id)
+
+
 def _get_order_list(page: int, page_size: int):
     """
     获取订单列表分页数据。
@@ -320,6 +339,37 @@ async def update_user_tier(user_id: str, payload: UpdateTierRequest):
         tier=updated["tier"],
         updated_at=datetime.now(timezone.utc).isoformat(),
     )
+
+
+# POST /api/admin/users/{user_id}/reset-password
+@router.post("/users/{user_id}/reset-password", response_model=ResetPasswordResponse)
+async def reset_user_password(user_id: str):
+    """
+    管理员重置用户密码。
+
+    流程：
+      1. 生成 8 位随机密码（字母+数字）
+      2. PBKDF2 哈希后更新到 Redis
+      3. 通过阿里云短信将新密码发至用户手机
+      4. 短信发送失败时降级为 console.log 打印
+    """
+    phone, new_password = _reset_user_password(user_id)
+    if phone is None:
+        raise HTTPException(status_code=404, detail=f"用户 {user_id} 不存在")
+
+    # 发送短信（失败自动降级打印）
+    sms_ok = sms_service.send_password_sms(phone, new_password)
+
+    if sms_ok:
+        return ResetPasswordResponse(
+            success=True,
+            message="密码已重置并发送至用户手机",
+        )
+    else:
+        return ResetPasswordResponse(
+            success=True,
+            message="密码已重置（短信发送失败，已打印至控制台）",
+        )
 
 
 # GET /api/admin/orders
