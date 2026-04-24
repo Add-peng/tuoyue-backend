@@ -24,6 +24,7 @@ load_dotenv()
 import sms_service
 import user_store
 from app.middleware import SensitiveWordMiddleware, sensitive_filter
+from app.admin import router as admin_router
 
 try:
     from pythonjsonlogger import jsonlogger
@@ -137,6 +138,12 @@ _ = sensitive_filter
 redis_client = redis.Redis(host='localhost', port=6379, decode_responses=True)
 # 注入共享实例给 user_store，避免重复连接
 user_store.set_redis_client(redis_client)
+# 注入共享实例给 admin，避免重复连接
+from app import admin
+admin.set_redis_client(redis_client)
+
+# 注册管理后台路由
+app.include_router(admin_router)
 
 # ================== FastAPI 生命周期事件 ==================
 
