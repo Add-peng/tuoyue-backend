@@ -1,5 +1,6 @@
 from fastapi import FastAPI, HTTPException, BackgroundTasks, Request, Header
 from pydantic import BaseModel
+from typing import Optional
 from fastapi.middleware.cors import CORSMiddleware
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
@@ -26,6 +27,7 @@ import user_store
 from app.middleware import SensitiveWordMiddleware, sensitive_filter
 from app.admin import router as admin_router
 import billing_service
+import payment_service
 
 try:
     from pythonjsonlogger import jsonlogger
@@ -144,6 +146,8 @@ from app import admin
 admin.set_redis_client(redis_client)
 # 注入共享实例给 billing_service，避免重复连接
 billing_service.set_redis_client(redis_client)
+# 注入共享实例给 payment_service，避免重复连接
+payment_service.set_redis_client(redis_client)
 
 # 注册管理后台路由
 app.include_router(admin_router)
@@ -558,6 +562,122 @@ async def get_user_credits(authorization: str = Header(None)):
         raise HTTPException(status_code=401, detail="Token 无效或已过期")
     credits = billing_service.get_credits(user_id)
     return CreditsResponse(credits=credits)
+
+
+# ================= 支付接口 =================
+
+class CreateOrderRequest(BaseModel):
+    package_id: str  # pkg_10 | pkg_50 | pkg_100
+
+
+class CreateOrderResponse(BaseModel):
+    order_id: str
+    pay_url: str
+    amount: str
+    credits: int
+    package_name: str
+
+
+class OrderStatusResponse(BaseModel):
+    order_id: str
+    status: str        # pending | paid | failed
+    amount: str
+    credits: int
+    paid_at: Optional[int] = None
+    trade_no: Optional[str] = None
+
+
+@app.post("/api/order/create", response_model=CreateOrderResponse)
+async def create_order(
+    payload: CreateOrderRequest,
+    authorization: str = Header(None),
+):
+    """
+    创建支付宝网页支付订单，返回支付跳转 URL。
+
+    - 需要 JWT 认证
+    - package_id: pkg_10 / pkg_50 / pkg_100
+    """
+    _check_redis()
+    if not authorization:
+        raise HTTPException(status_code=401, detail="未提供认证 Token")
+    token = authorization[7:] if authorization.lower().startswith("bearer ") else authorization
+    user_id = user_store.extract_user_id_from_token(token)
+    if not user_id:
+        raise HTTPException(status_code=401, detail="Token 无效或已过期")
+
+    try:
+        result = payment_service.create_order(user_id, payload.package_id)
+        return CreateOrderResponse(**result)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except RuntimeError as e:
+        logger.error("Payment SDK error: %s", e)
+        raise HTTPException(status_code=503, detail=str(e))
+    except Exception as e:
+        logger.error("create_order unexpected error: %s", e)
+        raise HTTPException(status_code=500, detail="订单创建失败，请稍后重试")
+
+
+@app.post("/api/order/webhook")
+async def alipay_webhook(request: Request):
+    """
+    接收支付宝异步通知（POST form-data）。
+
+    流程：
+    1. 解析 form 参数
+    2. 验签（RSA2）
+    3. 更新订单状态并发放积分
+    4. 返回 "success" 字符串（支付宝规范）
+    """
+    form = await request.form()
+    params = dict(form)
+
+    # 验签
+    if not payment_service.verify_notify(params.copy()):
+        logger.warning("Alipay notify: signature verification failed")
+        raise HTTPException(status_code=400, detail="签名验证失败")
+
+    # 处理支付结果（幂等，发放积分）
+    payment_service.handle_paid_notify(params)
+
+    # 支付宝规范：必须返回纯文本 "success"
+    from starlette.responses import PlainTextResponse
+    return PlainTextResponse("success")
+
+
+@app.get("/api/order/status/{order_id}", response_model=OrderStatusResponse)
+async def get_order_status(order_id: str, authorization: str = Header(None)):
+    """
+    查询订单状态。
+
+    - 需要 JWT 认证
+    - 只能查询自己的订单
+    """
+    _check_redis()
+    if not authorization:
+        raise HTTPException(status_code=401, detail="未提供认证 Token")
+    token = authorization[7:] if authorization.lower().startswith("bearer ") else authorization
+    user_id = user_store.extract_user_id_from_token(token)
+    if not user_id:
+        raise HTTPException(status_code=401, detail="Token 无效或已过期")
+
+    order = payment_service.get_order(order_id)
+    if not order:
+        raise HTTPException(status_code=404, detail="订单不存在")
+
+    # 权限检查：只能查自己的订单
+    if order["user_id"] != user_id:
+        raise HTTPException(status_code=403, detail="无权查询该订单")
+
+    return OrderStatusResponse(
+        order_id=order["order_id"],
+        status=order["status"],
+        amount=order["amount"],
+        credits=order["credits"],
+        paid_at=order.get("paid_at"),
+        trade_no=order.get("trade_no"),
+    )
 
 
 # 健康检查接口

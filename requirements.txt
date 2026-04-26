@@ -10,5 +10,6 @@ pyjwt>=2.0.0            # JWT 令牌（系统已预装 pyjwt 2.12.1）
 python-dotenv           # .env 环境变量加载（系统已预装）
 requests                # HTTP 客户端（系统已预装 requests 2.31.0）
 # alibaba-cloud-sdk-python-sdk>=1.8.0  # 阿里云 SMS SDK（网络不通时用 requests 直调 OpenAPI）
+alipay-sdk-python>=3.3.398  # 支付宝支付 SDK
 
 
