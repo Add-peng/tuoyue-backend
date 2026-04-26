@@ -21,6 +21,8 @@ from pydantic import BaseModel, Field
 
 # 复用短信服务
 import sms_service
+# 积分服务
+import billing_service
 
 # ---------------------------------------------------------------------------
 # 共享 Redis 客户端（从 main.py 注入）
@@ -401,3 +403,43 @@ async def list_orders(
 async def get_stats():
     stats = _get_platform_stats()
     return StatsResponse(**stats)
+
+
+# ── 积分发放 ──
+
+class GrantCreditsRequest(BaseModel):
+    amount: int = Field(..., gt=0, description="发放积分数量（必须 > 0）")
+
+
+class GrantCreditsResponse(BaseModel):
+    success: bool
+    user_id: str
+    granted: int
+    balance: int
+    message: str = ""
+
+
+# POST /api/admin/users/{user_id}/grant-credits
+@router.post("/users/{user_id}/grant-credits", response_model=GrantCreditsResponse)
+async def grant_credits(user_id: str, payload: GrantCreditsRequest):
+    """
+    管理员手动为指定用户发放积分。
+
+    - 调用 billing_service.grant_credits() 原子 INCRBY
+    - 返回发放后的最新余额
+    """
+    if payload.amount <= 0:
+        raise HTTPException(status_code=400, detail="积分数量必须大于 0")
+    try:
+        new_balance = billing_service.grant_credits(
+            user_id, payload.amount, reason="admin_grant"
+        )
+        return GrantCreditsResponse(
+            success=True,
+            user_id=user_id,
+            granted=payload.amount,
+            balance=new_balance,
+            message=f"成功为用户 {user_id} 发放 {payload.amount} 积分，当前余额 {new_balance}",
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"积分发放失败：{str(e)}")

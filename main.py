@@ -25,6 +25,7 @@ import sms_service
 import user_store
 from app.middleware import SensitiveWordMiddleware, sensitive_filter
 from app.admin import router as admin_router
+import billing_service
 
 try:
     from pythonjsonlogger import jsonlogger
@@ -141,6 +142,8 @@ user_store.set_redis_client(redis_client)
 # 注入共享实例给 admin，避免重复连接
 from app import admin
 admin.set_redis_client(redis_client)
+# 注入共享实例给 billing_service，避免重复连接
+billing_service.set_redis_client(redis_client)
 
 # 注册管理后台路由
 app.include_router(admin_router)
@@ -231,7 +234,8 @@ def _validate_phone(phone: str) -> bool:
 
 
 # 后台执行 CrewAI 的任务函数
-def run_crew_task(task_id: str, topic: str):
+def run_crew_task(task_id: str, topic: str, user_id: str = None):
+    import random as _random
     started_at = time.time()
     logger.info(
         "task started",
@@ -246,10 +250,46 @@ def run_crew_task(task_id: str, topic: str):
         return
     try:
         result_text, trace_data = run_copywriter_crew(topic)
+
+        # ── Token 用量采集（模拟，生产环境替换为 CrewAI 回调实际值） ──
+        prompt_tokens = _random.randint(200, 800)
+        completion_tokens = _random.randint(100, 500)
+        logger.info(
+            "token usage recorded",
+            extra={
+                "task_id": task_id,
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": completion_tokens,
+            },
+        )
+
+        # ── 积分扣减（任务成功后执行） ──
+        if user_id:
+            try:
+                credits_used = billing_service.calculate_credits(prompt_tokens, completion_tokens)
+                success, remaining = billing_service.deduct_credits(user_id, credits_used)
+                logger.info(
+                    "credits deducted for task",
+                    extra={
+                        "task_id": task_id,
+                        "user_id": user_id,
+                        "credits_used": credits_used,
+                        "remaining": remaining,
+                    },
+                )
+            except Exception as billing_err:
+                # 扣费失败不影响任务结果返回，仅记录错误
+                logger.error(
+                    "billing deduction failed",
+                    extra={"task_id": task_id, "user_id": user_id, "error": str(billing_err)},
+                )
+
         redis_client.hset(task_id, mapping={
             "status": "completed",
             "data": result_text,
             "trace": json.dumps(trace_data, ensure_ascii=False),
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
         })
         redis_client.expire(task_id, 3600)
         logger.info(
@@ -275,16 +315,40 @@ def run_crew_task(task_id: str, topic: str):
 # 异步生成接口：立即返回 task_id，后台执行
 @app.post("/api/generate")
 @limiter.limit("10/minute")
-async def generate_api(request: Request, payload: CopyRequest, background_tasks: BackgroundTasks):
+async def generate_api(request: Request, payload: CopyRequest, background_tasks: BackgroundTasks, authorization: str = Header(None)):
     if not _CREWAI_AVAILABLE:
         raise HTTPException(status_code=503, detail="AI 引擎暂不可用（crewai 未安装）")
+
+    # ── 从 JWT 解析 user_id（可选，未登录用户跳过积分检查） ──
+    user_id = None
+    if authorization:
+        token = authorization[7:] if authorization.lower().startswith("bearer ") else authorization
+        user_id = user_store.extract_user_id_from_token(token)
+
+    # ── 前置积分检查（仅已登录用户） ──
+    if user_id:
+        try:
+            if not billing_service.has_sufficient_credits(user_id):
+                raise HTTPException(
+                    status_code=402,
+                    detail="积分不足，请充值。",
+                )
+        except HTTPException:
+            raise
+        except Exception as billing_err:
+            logger.warning(
+                "billing check failed, proceeding without check",
+                extra={"user_id": user_id, "error": str(billing_err)},
+            )
+
     task_id = str(uuid.uuid4())
     redis_client.hset(task_id, mapping={"status": "processing"})
     redis_client.expire(task_id, 3600)
-    background_tasks.add_task(run_crew_task, task_id, payload.topic)
+    # 将 user_id 传入后台任务，用于任务完成后扣减积分
+    background_tasks.add_task(run_crew_task, task_id, payload.topic, user_id)
     logger.info(
         "request received",
-        extra={"task_id": task_id, "topic": payload.topic},
+        extra={"task_id": task_id, "topic": payload.topic, "user_id": user_id},
     )
     return {
         "status": "processing",
@@ -462,6 +526,38 @@ async def get_profile(authorization: str = Header(None)):
         tier=user.get("tier", "Free"),
         daily_quota=user.get("daily_quota", 10),
     )
+
+
+
+
+# ================= 积分接口 =================
+
+class CreditsResponse(BaseModel):
+    credits: int
+
+
+class GrantCreditsRequest(BaseModel):
+    amount: int
+
+
+class GrantCreditsResponse(BaseModel):
+    success: bool
+    user_id: str
+    granted: int
+    balance: int
+
+
+@app.get("/api/user/credits", response_model=CreditsResponse)
+async def get_user_credits(authorization: str = Header(None)):
+    """查询当前用户积分余额（需要 JWT Token）"""
+    if not authorization:
+        raise HTTPException(status_code=401, detail="未提供认证 Token")
+    token = authorization[7:] if authorization.lower().startswith("bearer ") else authorization
+    user_id = user_store.extract_user_id_from_token(token)
+    if not user_id:
+        raise HTTPException(status_code=401, detail="Token 无效或已过期")
+    credits = billing_service.get_credits(user_id)
+    return CreditsResponse(credits=credits)
 
 
 # 健康检查接口

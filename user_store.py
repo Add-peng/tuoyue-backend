@@ -198,6 +198,18 @@ def create_user(phone: str, password: str = "") -> dict:
     pipe.execute()
 
     logger.info("User created", extra={"user_id": user_id, "phone_masked": mask_phone(phone)})
+
+    # 新用户注册奖励积分（延迟导入避免循环依赖）
+    try:
+        import billing_service
+        billing_service.grant_credits(user_id, billing_service.INITIAL_CREDITS, reason="new_user_bonus")
+        logger.info(
+            "New user bonus granted",
+            extra={"user_id": user_id, "credits": billing_service.INITIAL_CREDITS},
+        )
+    except Exception as e:
+        logger.error("Failed to grant new user bonus: %s", e)
+
     user_data.pop("password_hash", None)
     return user_data
 
