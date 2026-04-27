@@ -218,9 +218,9 @@ class AuthResponse(BaseModel):
 
 class UserProfileResponse(BaseModel):
     user_id: str
-    phone: str
+    phone: str       # 脱敏后手机号
     tier: str
-    daily_quota: int
+    credits: int     # 积分余额（MySQL User 表）
 
 
 # ================== 验证码 + Redis Key ==================
@@ -465,33 +465,38 @@ async def verify_code(request: Request, payload: VerifyCodeRequest):
 
 @app.post("/api/auth/register", response_model=AuthResponse)
 async def register(request: Request, payload: AuthByCodeRequest):
-    """注册（手机号 + 验证码）"""
+    """注册（手机号 + 验证码），新用户写入 MySQL User 表"""
     _check_redis()
     phone = payload.phone.strip()
     code = payload.code.strip()
 
-    # 先校验验证码（复用 verify_code 逻辑）
+    # ① 校验验证码
     code_key = _sms_code_key(phone)
     stored_code = redis_client.get(code_key)
     if not stored_code or stored_code != code:
         raise HTTPException(status_code=400, detail="验证码错误或已过期")
-
     redis_client.delete(code_key)
 
-    # 获取或创建用户（注册即登录）
-    user, is_new = user_store.get_or_create_user(phone)
-    token = user_store.create_token(user["user_id"], phone)
+    # ② 写入 MySQL（phone 唯一，重复注册抛 ValueError）
+    import user_db
+    try:
+        user, is_new = await user_db.get_or_create_user(phone)
+    except ValueError:
+        raise HTTPException(status_code=409, detail="该手机号已注册，请直接登录")
+
+    # ③ 生成 JWT
+    token = user_store.create_token(user["id"], phone)
 
     logger.info(
         "User registered",
-        extra={"user_id": user["user_id"], "is_new_user": is_new},
+        extra={"user_id": user["id"], "is_new_user": is_new},
     )
     return AuthResponse(token=token, is_new_user=is_new)
 
 
 @app.post("/api/auth/login", response_model=AuthResponse)
 async def login(request: Request, payload: AuthByCodeRequest):
-    """登录（手机号 + 验证码，同注册逻辑）"""
+    """登录（手机号 + 验证码），从 MySQL User 表读取用户"""
     _check_redis()
     phone = payload.phone.strip()
     code = payload.code.strip()
@@ -501,24 +506,26 @@ async def login(request: Request, payload: AuthByCodeRequest):
     stored_code = redis_client.get(code_key)
     if not stored_code or stored_code != code:
         raise HTTPException(status_code=400, detail="验证码错误或已过期")
-
     redis_client.delete(code_key)
 
-    # 获取或创建用户
-    user, is_new = user_store.get_or_create_user(phone)
-    token = user_store.create_token(user["user_id"], phone)
+    # 从 MySQL 查询（登录不自动创建，用户需先注册）
+    import user_db
+    user = await user_db.get_user_by_phone(phone)
+    if not user:
+        raise HTTPException(status_code=404, detail="用户不存在，请先注册")
+
+    token = user_store.create_token(user["id"], phone)
 
     logger.info(
         "User logged in",
-        extra={"user_id": user["user_id"], "is_new_user": is_new},
+        extra={"user_id": user["id"], "is_new_user": False},
     )
-    return AuthResponse(token=token, is_new_user=is_new)
+    return AuthResponse(token=token, is_new_user=False)
 
 
 @app.get("/api/user/profile", response_model=UserProfileResponse)
 async def get_profile(authorization: str = Header(None)):
-    """获取用户信息（从 JWT Token 解析）"""
-    _check_redis()
+    """获取用户信息（从 JWT Token 解析，MySQL 查询）"""
     if not authorization:
         raise HTTPException(status_code=401, detail="未提供认证 Token")
 
@@ -531,15 +538,17 @@ async def get_profile(authorization: str = Header(None)):
     if not user_id:
         raise HTTPException(status_code=401, detail="Token 无效或已过期")
 
-    user = user_store.get_user_by_id(user_id)
+    # 从 MySQL User 表读取
+    import user_db
+    user = await user_db.get_user_by_id(user_id)
     if not user:
         raise HTTPException(status_code=404, detail="用户不存在")
 
     return UserProfileResponse(
-        user_id=user["user_id"],
-        phone=user.get("phone_masked", "****"),
-        tier=user.get("tier", "Free"),
-        daily_quota=user.get("daily_quota", 10),
+        user_id=user["id"],
+        phone=_mask_phone(user["phone"]),
+        tier=user["tier"],
+        credits=user["credits"],
     )
 
 
