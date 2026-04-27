@@ -28,6 +28,7 @@ from app.middleware import SensitiveWordMiddleware, sensitive_filter
 from app.admin import router as admin_router
 import billing_service
 import payment_service
+from lib.prisma import connect as prisma_connect, disconnect as prisma_disconnect
 
 try:
     from pythonjsonlogger import jsonlogger
@@ -157,7 +158,17 @@ app.include_router(admin_router)
 @app.on_event("startup")
 async def startup_event():
     """应用启动时初始化各组件"""
+    try:
+        await prisma_connect()
+    except Exception as e:
+        logger.warning("Prisma connect failed (DB may not be configured yet): %s", e)
     logger.info("应用启动完成")
+
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    """应用关闭时断开数据库连接"""
+    await prisma_disconnect()
 
 
 def _check_redis():

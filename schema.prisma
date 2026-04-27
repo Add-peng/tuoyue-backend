@@ -1,0 +1,65 @@
+// schema.prisma
+// Prisma Python Client (prisma-client-py) 配置
+// 文档: https://prisma-client-py.readthedocs.io/
+
+generator client {
+  provider             = "prisma-client-py"
+  // 使用异步接口（FastAPI 兼容）
+  interface            = "asyncio"
+  recursive_type_depth = 5
+}
+
+datasource db {
+  provider = "mysql"
+  url      = env("DATABASE_URL")
+}
+
+// ===================== 用户表 =====================
+model User {
+  id        String   @id @default(cuid())
+  phone     String   @unique @db.VarChar(20)
+  tier      String   @default("Free") @db.VarChar(20)
+  credits   Int      @default(100)
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  // 关联
+  orders    Order[]
+
+  @@map("users")
+}
+
+// ===================== 订单表 =====================
+model Order {
+  id        String   @id @default(cuid())
+  userId    String   @map("user_id")
+  amount    String   @db.VarChar(20)          // 保持字符串，与支付宝 SDK 一致
+  credits   Int
+  status    String   @default("pending") @db.VarChar(20)  // pending | paid | failed
+  tradeNo   String?  @map("trade_no") @db.VarChar(64)     // 支付宝交易号
+  paidAt    DateTime? @map("paid_at")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  // 关联
+  user      User     @relation(fields: [userId], references: [id])
+
+  @@index([userId])
+  @@map("orders")
+}
+
+// ===================== 智能体表 =====================
+model Agent {
+  id          String   @id @default(cuid())
+  name        String   @db.VarChar(100)
+  description String?  @db.Text
+  agentId     String   @unique @map("agent_id") @db.VarChar(100)
+  category    String   @db.VarChar(50)
+  access      String   @default("public") @db.VarChar(20)   // public | private
+  status      String   @default("active") @db.VarChar(20)   // active | inactive
+  userCount   Int      @default(0) @map("user_count")
+  author      String   @db.VarChar(100)
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  @@map("agents")
+}
