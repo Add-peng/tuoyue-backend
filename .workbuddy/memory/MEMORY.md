@@ -23,12 +23,13 @@
 ## 已实现模块
 
 ### 认证与用户
-- `user_store.py`：基于 Redis 的用户存储（手机号哈希 key、JWT 7天 token、PBKDF2 密码哈希）
+- `user_store.py`：JWT 工具（create_token / decode_token / extract_user_id）
+- `user_db.py`：MySQL（Prisma）用户数据访问层（注册/查询/积分读写）
 - 接口：`POST /api/auth/send-code`、`/api/auth/register`、`/api/auth/login`、`GET /api/user/profile`
 
 ### 积分计费
-- `billing_service.py`：Redis 原子积分操作（grant/deduct/get/has_sufficient）
-- 计费规则：1积分/1K tokens；新用户奖励 100 积分
+- `billing_service.py`：MySQL User.credits 字段，asyncio 封装同步入口
+- 计费规则：1积分/1K tokens；新用户 credits=100（schema 默认）
 - 接口：`GET /api/user/credits`
 
 ### 支付宝支付
