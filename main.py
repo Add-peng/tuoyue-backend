@@ -139,7 +139,11 @@ app.add_middleware(SensitiveWordMiddleware)
 _ = sensitive_filter
 
 # Redis 客户端（连接本地 Docker 运行的 Redis）
-redis_client = redis.Redis(host='localhost', port=6379, decode_responses=True)
+redis_client = redis.Redis(
+    host=os.getenv("REDIS_HOST", "localhost"),
+    port=int(os.getenv("REDIS_PORT", "6379")),
+    decode_responses=True,
+)
 # 注入共享实例给 user_store，避免重复连接
 user_store.set_redis_client(redis_client)
 # 注入共享实例给 admin，避免重复连接
