@@ -126,7 +126,10 @@ app.add_middleware(ForceUTF8Middleware)
 # 配置跨域 (CORS)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=[
+        "http://localhost:3000",
+        "https://pofengzhetuoyue.vercel.app",
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -338,13 +341,15 @@ async def generate_api(request: Request, payload: CopyRequest, background_tasks:
     if not _CREWAI_AVAILABLE:
         raise HTTPException(status_code=503, detail="AI 引擎暂不可用（crewai 未安装）")
 
-    # ── 从 JWT 解析 user_id（可选，未登录用户跳过积分检查） ──
-    user_id = None
-    if authorization:
-        token = authorization[7:] if authorization.lower().startswith("bearer ") else authorization
-        user_id = user_store.extract_user_id_from_token(token)
+    # ── JWT 鉴权（必选） ──
+    if not authorization:
+        raise HTTPException(status_code=401, detail="请先登录")
+    token = authorization[7:] if authorization.lower().startswith("bearer ") else authorization
+    user_id = user_store.extract_user_id_from_token(token)
+    if not user_id:
+        raise HTTPException(status_code=401, detail="请先登录")
 
-    # ── 前置积分检查（仅已登录用户） ──
+    # ── 前置积分检查 ──
     if user_id:
         try:
             if not billing_service.has_sufficient_credits(user_id):
