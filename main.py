@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, BackgroundTasks, Request, Header
+﻿from fastapi import FastAPI, HTTPException, BackgroundTasks, Request, Header
 from pydantic import BaseModel
 from typing import Optional
 from fastapi.middleware.cors import CORSMiddleware
@@ -24,6 +24,7 @@ load_dotenv()
 # 业务模块
 import sms_service
 import user_store
+import jwt_utils
 from app.middleware import SensitiveWordMiddleware, sensitive_filter
 from app.admin import router as admin_router
 import billing_service
@@ -126,10 +127,7 @@ app.add_middleware(ForceUTF8Middleware)
 # 配置跨域 (CORS)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:3000",
-        "https://pofengzhetuoyue.vercel.app",
-    ],
+    allow_origins = ['https://pofengzhetuoyue.vercel.app', 'http://localhost:3000'],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -141,45 +139,82 @@ app.add_middleware(SensitiveWordMiddleware)
 # 提前初始化全局敏感词过滤器
 _ = sensitive_filter
 
-# Redis 客户端（连接本地 Docker 运行的 Redis）
-redis_client = redis.Redis(
-    host=os.getenv("REDIS_HOST", "localhost"),
-    port=int(os.getenv("REDIS_PORT", "6379")),
-    decode_responses=True,
-)
-# 注入共享实例给 user_store，避免重复连接
-user_store.set_redis_client(redis_client)
-# 注入共享实例给 admin，避免重复连接
-from app import admin
-admin.set_redis_client(redis_client)
-# 注入共享实例给 billing_service，避免重复连接
-billing_service.set_redis_client(redis_client)
-# 注入共享实例给 payment_service，避免重复连接
-payment_service.set_redis_client(redis_client)
-
 # 注册管理后台路由
 app.include_router(admin_router)
 
+# Redis 客户端引用（在 startup 事件中创建）
+redis_client: redis.Redis | None = None
+
 # ================== FastAPI 生命周期事件 ==================
+
+def _get_redis_url() -> str:
+    """从环境变量构造 Redis URL，优先级: REDIS_URL > REDIS_HOST+REDIS_PORT"""
+    url = os.getenv("REDIS_URL")
+    if url:
+        return url
+    host = os.getenv("REDIS_HOST", "localhost")
+    port = os.getenv("REDIS_PORT", "6379")
+    return f"redis://{host}:{port}/0"
+
 
 @app.on_event("startup")
 async def startup_event():
     """应用启动时初始化各组件"""
+    global redis_client
+
+    # ── Redis 连接 ──────────────────────────────────────
+    try:
+        redis_url = _get_redis_url()
+        redis_client = redis.from_url(redis_url, decode_responses=True)
+        redis_client.ping()
+        # 注入共享实例给各模块，避免重复连接
+        user_store.set_redis_client(redis_client)
+        from app import admin
+        admin.set_redis_client(redis_client)
+        billing_service.set_redis_client(redis_client)
+        payment_service.set_redis_client(redis_client)
+        # 挂载到 app.state 方便后续扩展获取
+        app.state.redis = redis_client
+        logger.info("Redis connected")
+    except Exception as e:
+        logger.warning("Redis connection failed, proceeding without Redis: %s", e)
+        redis_client = None
+
+    # ── Prisma / MySQL 连接 ─────────────────────────────
     try:
         await prisma_connect()
     except Exception as e:
         logger.warning("Prisma connect failed (DB may not be configured yet): %s", e)
+
     logger.info("应用启动完成")
 
 
 @app.on_event("shutdown")
 async def shutdown_event():
-    """应用关闭时断开数据库连接"""
+    """应用关闭时断开数据库和 Redis 连接"""
+    global redis_client
+
+    # ── Redis 关闭 ──────────────────────────────────────
+    if redis_client:
+        try:
+            redis_client.close()
+            logger.info("Redis connection closed")
+        except Exception as e:
+            logger.warning("Redis close error: %s", e)
+        redis_client = None
+
+    # ── Prisma / MySQL 关闭 ─────────────────────────────
     await prisma_disconnect()
 
 
 def _check_redis():
     """检查 Redis 连通性，不通则抛 HTTPException 503"""
+    global redis_client
+    if redis_client is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Redis 未连接或不可用，请检查 Redis 配置",
+        )
     try:
         redis_client.ping()
     except redis.exceptions.ConnectionError:
@@ -345,7 +380,7 @@ async def generate_api(request: Request, payload: CopyRequest, background_tasks:
     if not authorization:
         raise HTTPException(status_code=401, detail="请先登录")
     token = authorization[7:] if authorization.lower().startswith("bearer ") else authorization
-    user_id = user_store.extract_user_id_from_token(token)
+    user_id = jwt_utils.extract_user_id_from_token(token)
     if not user_id:
         raise HTTPException(status_code=401, detail="请先登录")
 
@@ -494,7 +529,7 @@ async def register(request: Request, payload: AuthByCodeRequest):
         raise HTTPException(status_code=409, detail="该手机号已注册，请直接登录")
 
     # ③ 生成 JWT
-    token = user_store.create_token(user["id"], phone)
+    token = jwt_utils.create_token(user["id"], phone)
 
     logger.info(
         "User registered",
@@ -523,7 +558,7 @@ async def login(request: Request, payload: AuthByCodeRequest):
     if not user:
         raise HTTPException(status_code=404, detail="用户不存在，请先注册")
 
-    token = user_store.create_token(user["id"], phone)
+    token = jwt_utils.create_token(user["id"], phone)
 
     logger.info(
         "User logged in",
@@ -543,7 +578,7 @@ async def get_profile(authorization: str = Header(None)):
     if authorization.lower().startswith("bearer "):
         token = authorization[7:]
 
-    user_id = user_store.extract_user_id_from_token(token)
+    user_id = jwt_utils.extract_user_id_from_token(token)
     if not user_id:
         raise HTTPException(status_code=401, detail="Token 无效或已过期")
 
@@ -586,7 +621,7 @@ async def get_user_credits(authorization: str = Header(None)):
     if not authorization:
         raise HTTPException(status_code=401, detail="未提供认证 Token")
     token = authorization[7:] if authorization.lower().startswith("bearer ") else authorization
-    user_id = user_store.extract_user_id_from_token(token)
+    user_id = jwt_utils.extract_user_id_from_token(token)
     if not user_id:
         raise HTTPException(status_code=401, detail="Token 无效或已过期")
     credits = billing_service.get_credits(user_id)
@@ -631,12 +666,12 @@ async def create_order(
     if not authorization:
         raise HTTPException(status_code=401, detail="未提供认证 Token")
     token = authorization[7:] if authorization.lower().startswith("bearer ") else authorization
-    user_id = user_store.extract_user_id_from_token(token)
+    user_id = jwt_utils.extract_user_id_from_token(token)
     if not user_id:
         raise HTTPException(status_code=401, detail="Token 无效或已过期")
 
     try:
-        result = payment_service.create_order(user_id, payload.package_id)
+        result = await payment_service.create_order(user_id, payload.package_id)
         return CreateOrderResponse(**result)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -668,7 +703,7 @@ async def alipay_webhook(request: Request):
         raise HTTPException(status_code=400, detail="签名验证失败")
 
     # 处理支付结果（幂等，发放积分）
-    payment_service.handle_paid_notify(params)
+    await payment_service.handle_paid_notify(params)
 
     # 支付宝规范：必须返回纯文本 "success"
     from starlette.responses import PlainTextResponse
@@ -687,11 +722,11 @@ async def get_order_status(order_id: str, authorization: str = Header(None)):
     if not authorization:
         raise HTTPException(status_code=401, detail="未提供认证 Token")
     token = authorization[7:] if authorization.lower().startswith("bearer ") else authorization
-    user_id = user_store.extract_user_id_from_token(token)
+    user_id = jwt_utils.extract_user_id_from_token(token)
     if not user_id:
         raise HTTPException(status_code=401, detail="Token 无效或已过期")
 
-    order = payment_service.get_order(order_id)
+    order = await payment_service.get_order(order_id)
     if not order:
         raise HTTPException(status_code=404, detail="订单不存在")
 
