@@ -4,9 +4,12 @@ import os
 import time
 
 # ================= 拓岳专属 API 配置区 =================
-os.environ["OPENAI_API_KEY"] = "sk-NNkUVKrc2gcPwwjvJmzvPglyCQtjW6Cc7SKh0NZjGJrt1VOb"
-os.environ["OPENAI_API_BASE"] = "http://api.tuoyue-tech.shop/v1"
-os.environ["OPENAI_MODEL_NAME"] = "gpt-4o-mini"
+api_key = os.getenv("OPENAI_API_KEY")
+if not api_key:
+    raise RuntimeError("OPENAI_API_KEY 环境变量未设置")
+os.environ["OPENAI_API_KEY"] = api_key
+os.environ["OPENAI_API_BASE"] = os.getenv("OPENAI_API_BASE", "http://api.tuoyue-tech.shop/v1")
+os.environ["OPENAI_MODEL_NAME"] = os.getenv("OPENAI_MODEL_NAME", "gpt-4o-mini")
 # =======================================================
 
 logger = logging.getLogger("tuoyue")

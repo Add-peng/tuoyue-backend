@@ -204,6 +204,7 @@ def create_order(user_id: str, package_id: str) -> Dict[str, Any]:
     # ── MySQL Order 表（权威来源）─────────────────────────────
     try:
         import asyncio
+        # TODO: 此 asyncio.run() 在异步上下文中可能引发事件循环冲突，需重构为直接 await
         asyncio.run(_create_order_mysql(order_id, user_id, amount, credits))
     except Exception as e:
         logger.error("create_order: MySQL write failed, order_id=%s: %s", order_id, e)
@@ -294,6 +295,7 @@ def handle_paid_notify(params: Dict[str, str]) -> bool:
     # ── 幂等检查（优先查 MySQL，权威来源）─────────────────────
     try:
         import asyncio
+        # TODO: 此 asyncio.run() 在异步上下文中可能引发事件循环冲突，需重构为直接 await
         already_paid = asyncio.run(_check_order_paid_mysql(out_trade_no))
     except Exception as mysql_check_err:
         logger.warning(
@@ -312,6 +314,7 @@ def handle_paid_notify(params: Dict[str, str]) -> bool:
     # ── MySQL 更新订单状态 + 发放积分（原子感）────────────────
     try:
         import asyncio
+        # TODO: 此 asyncio.run() 在异步上下文中可能引发事件循环冲突，需重构为直接 await
         order_record = asyncio.run(_handle_paid_notify_mysql(out_trade_no, trade_no))
     except Exception as mysql_err:
         logger.error(
@@ -426,6 +429,7 @@ def get_order(order_id: str) -> Optional[Dict[str, Any]]:
     # ── 优先查 MySQL（权威来源）───────────────────────────────
     try:
         import asyncio
+        # TODO: 此 asyncio.run() 在异步上下文中可能引发事件循环冲突，需重构为直接 await
         order_record = asyncio.run(_get_order_mysql(order_id))
         if order_record:
             return {
