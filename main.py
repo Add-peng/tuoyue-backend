@@ -755,6 +755,12 @@ def read_root():
 async def health_check():
     return {"status": "ok"}
 
+# 统计面板接口
+@app.get("/api/stats")
+async def get_stats():
+    return {"total_users": 100, "today_generations": 1284, "today_revenue": 299.0, "active_agents": 3}
+
+
 # Redis 连通性检查
 @app.get("/api/health/redis")
 def check_redis():
