@@ -1,6 +1,6 @@
 fastapi
 uvicorn
-crewai
+crewai==1.14.2
 pydantic
 python-json-logger
 slowapi

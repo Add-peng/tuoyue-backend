@@ -150,7 +150,7 @@ def send_sms_code(phone: str, code: str) -> bool:
                     "phone": _mask_phone(phone),
                     "code": code,
                     "api_code": code_api,
-                    "message": result.get("Message", ""),
+                    "sms_message": result.get("Message", ""),
                 },
             )
             # 降级打印
@@ -239,7 +239,7 @@ def send_password_sms(phone: str, new_password: str) -> bool:
         else:
             logger.error(
                 "Password SMS send failed",
-                extra={"phone": _mask_phone(phone), "code": code_api, "msg": result.get("Message", "")},
+                extra={"phone": _mask_phone(phone), "code": code_api, "sms_msg": result.get("Message", "")},
             )
             return False
 
