@@ -4,12 +4,9 @@ RUN apt-get update && \
     apt-get install -y --no-install-recommends libatomic1 && \
     rm -rf /var/lib/apt/lists/*
 COPY requirements.txt .
-# 使用阿里云镜像源并设置超时
-RUN pip install --no-cache-dir -r requirements.txt \
-    -i https://mirrors.aliyun.com/pypi/simple/ \
-    --trusted-host mirrors.aliyun.com \
-    --timeout 600 \
-    --retries 10
+# 先强制单独安装 crewai，避免哈希冲突
+RUN pip install --no-cache-dir crewai==1.14.2
+RUN pip install --no-cache-dir -r requirements.txt
 COPY . .
 RUN python -m prisma py fetch && python -m prisma generate
 EXPOSE 8000
